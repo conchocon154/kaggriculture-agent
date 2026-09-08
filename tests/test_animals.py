@@ -97,12 +97,19 @@ def test_eggs_and_fertiliser_never_crash_the_way_melon_does():
     assert ka.price_at("MELON", ka.I0 + 400) == 1
 
 
-def test_supply_is_priced_as_if_the_opponent_matches_us():
-    """We cannot see their shed and on this ladder they are growing melon too.
-    Assuming we are the only seller is how an agent plants a whole farm of it."""
-    assert ka.RIVAL_SUPPLY > 0
-    solo = ka.price_at("MELON", ka.I0 + 60)
-    assert econ(standing={"MELON": 60}).price("MELON") < solo
+def test_the_rival_supply_knob_moves_the_price_it_is_supposed_to_move():
+    """Set to zero, and deliberately: in a mirror match where both farms flood
+    the same market, pricing in the opponent's melon lost 10-0. The pool only
+    drains at the town's one unit a day, so holding back hands it over rather
+    than protecting it. The knob stays because it is the assumption most worth
+    re-testing if the meta shifts."""
+    assert ka.RIVAL_SUPPLY == 0.0
+    ka.RIVAL_SUPPLY = 1.0
+    try:
+        assert econ(standing={"MELON": 60}).price("MELON") \
+            < ka.price_at("MELON", ka.I0 + 60)
+    finally:
+        ka.RIVAL_SUPPLY = 0.0
 
 
 # --------------------------------------------------------------------------
@@ -314,6 +321,22 @@ def test_no_livestock_while_animals_already_on_the_board_go_unfed():
     tiles[0][0] = pen(animal="GOOSE", fed=False)
     tiles[0][1] = pen("COOP")
     assert not _orders(ka.agent(obs(tiles=tiles, money=50000)), "BUY_ANIMAL")
+
+
+def test_buying_stops_while_bought_animals_are_still_waiting_on_a_pen():
+    """The matcher will not shuttle a bird when there is better work, and it is
+    right not to — forcing it was measured at 53,500 coins against 76,900. So
+    the farm has to stop at the till instead, or it accumulates livestock in
+    the shed: one game ended with twenty-four animals in there."""
+    tiles = [[None if x < 5 and y < 5 else "LOCKED" for x in range(10)]
+             for y in range(10)]
+    for i in range(4):
+        tiles[0][i] = pen("COOP")
+        tiles[1][i] = pen("PASTURE")
+    assert _orders(ka.agent(obs(tiles=tiles, money=50000)), "BUY_ANIMAL")
+
+    jammed = obs(tiles=tiles, money=50000, shed={"GOOSE": ka.BACKLOG_LIMIT})
+    assert not _orders(ka.agent(jammed), "BUY_ANIMAL")
 
 
 def test_land_waits_until_the_tiles_already_owned_are_working():

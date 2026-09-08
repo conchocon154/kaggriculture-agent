@@ -134,12 +134,18 @@ def sell_quantity(item, inventory, have, reserve):
 # the margin
 # --------------------------------------------------------------------------
 
-# We cannot see the opponent's shed, and on this ladder they are growing melon
-# too. Pricing our own supply as if it were the only supply is what makes an
-# agent plant a whole farm of melon and sell it for a dollar. Assume they match
-# us: it costs a little melon upside and buys a lot of protection, and the
-# alternative sink — eggs — has no ceiling to miss out on.
-RIVAL_SUPPLY = 1.0
+# How much of the opponent's supply to price in alongside our own. The obvious
+# answer is "as much as ours" — we cannot see their shed and on this ladder
+# they are growing melon too, so a farm that assumes it is the only seller
+# plants a whole field of melon and sells it for a dollar.
+#
+# Measured, the obvious answer is wrong, and not by a little: at 1.0 against
+# 0.0, in a mirror match where both farms flood the same market, 0.0 won 10-0
+# on 60,046 coins to 44,385. Melon is a common pool that only the town drains,
+# about one unit a day. Holding back does not protect the price, it just hands
+# the pool to whoever does not hold back. Left as a knob because it is the
+# assumption most worth re-testing if the meta shifts.
+RIVAL_SUPPLY = 0.0
 
 
 class Econ:
@@ -518,7 +524,18 @@ HIRE_HOURS = 1
 # lands near a dozen early and a little over that once melon money arrives,
 # which is roughly where the marginal hand stops paying for itself.
 HIRE_BUDGET = 0.15
-DROP_AT = 6              # a melon tile's worth; end of day banks the rest
+# How many bought animals may be waiting on a pen before the farm stops buying
+# more. The matcher prices housing at the animal's lifetime rate — about 27
+# coins an action against feeding jobs worth several hundred — so it correctly
+# never chooses to shuttle a bird when there is better work, and a farm that
+# keeps buying simply accumulates livestock in the shed: one game ended with
+# twenty-four animals in there, 8,700 coins that earned nothing.
+#
+# Forcing the shuttle instead, by pricing housing at what it unlocks, was
+# measured and is worse: 53,500 against 76,900. The turns really are better
+# spent. So the fix belongs at the till, not in the matcher.
+BACKLOG_LIMIT = 4
+DROP_AT = 3
 # Land is bought once the farm has run out of tiles to work, not before, and
 # never down to the last coin: an empty quadrant earns nothing and a farm with
 # no seed money cannot fill it.
@@ -723,7 +740,9 @@ def agent(obs, config=None):
         # refuses to spend turns on.
         labour = BIRDS_PER_UNIT * len(units) - pens["stock"] \
             - sum(shed.get(k, 0) for k in ANIMALS)
-        room = min(pens[ANIMALS[animal]["pen"]] - shed.get(animal, 0), labour)
+        backlog = sum(shed.get(k, 0) for k in ANIMALS)
+        room = 0 if backlog >= BACKLOG_LIMIT else \
+            min(pens[ANIMALS[animal]["pen"]] - shed.get(animal, 0), labour)
         cost = ANIMALS[animal]["cost"]
         if room > 0 and money > cost + STOCK_RESERVE:
             n = min(room, int((money - CASH_FLOOR) // cost), 4)
