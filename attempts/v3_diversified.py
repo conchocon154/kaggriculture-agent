@@ -19,32 +19,49 @@ from __future__ import annotations
 # reads like the safe staple — but melon sells for ten times as much and still
 # clears six units a plant, and the ablation puts it three times ahead even
 # after its price collapses under the volume. See scripts/ablate.py.
-CROP = "MELON"
-SEED_COST = 80
+# Not one crop but four. Each product has its own market inventory and its own
+# price curve, so a farm that sells only melon is competing against itself:
+# melon decays as `sq` with an above-target of 3.60, which puts it on the $1
+# floor about 300 units past the start. Splitting production across four
+# products means four separate curves to walk down instead of one to fall off.
+CROPS = ["MELON", "STRAWBERRY", "CARROT", "WHEAT"]
+SEED_COST = {"MELON": 80, "STRAWBERRY": 100, "CARROT": 20, "WHEAT": 10}
+
+# Read off the price table: below these the market is saturated and a unit is
+# worth more in the shed until the town's shops eat the glut and the price
+# recovers. Selling into a floored price is giving produce away.
+SELL_FLOOR = {"MELON": 70, "STRAWBERRY": 45, "CARROT": 16, "WHEAT": 14,
+              "TOMATO": 24, "FERTILIZER": 40}
+SHED_PRESSURE = 80          # past this the shed bins the overflow at 100
 # Six, not twelve. Hands are nearly free, but every HIRE is a market order and
 # only `maxMarketOrdersPerTurn` (10) are processed per turn — hiring twelve
 # fills the queue at hour 0 and silently drops that turn's seed purchase and
 # every sale behind it.
-# Five. Three was the optimum when the yardstick was coins against the built-in
-# starter; measured head-to-head against the previous agent — which is what the
-# ladder actually scores — five wins every game and three ties. Seven falls off
-# a cliff: the fib wage bill turns steep and the hires start crowding the
-# ten-order-per-turn market queue.
-HANDS_PER_DAY = 5
-# Twelve, not six. Batching was supposed to protect the melon price and the
-# earlier ablation already showed it did nothing for coin totals; head-to-head
-# it turns out selling *faster* wins, because in a contested market the melon
-# price is going to the floor either way and the first seller gets the good half.
-SELL_BATCH = 12
-SEED_BUFFER = 8
+# Nine, not three. Three was the optimum only because all the hires went out in
+# one turn and the tenth market order was dropped; dribbling them over several
+# turns lifts the cap, and hands are 1, 1, 2, 3, 5, 8 ... resetting daily.
+TARGET_HANDS = 9
+HIRES_PER_TURN = 3
+SEED_BUFFER = 10
+LAND_COSTS = [1000, 2000, 4000]
+CASH_BUFFER = 300
 
 SHED_TILES = [(4, 4), (5, 4), (4, 5), (5, 5)]
 
 MOVES = {"NORTH": (0, -1), "SOUTH": (0, 1), "EAST": (1, 0), "WEST": (-1, 0)}
 
 
+FIRST_YIELD = {"WHEAT": 2, "CARROT": 2, "TOMATO": 8, "STRAWBERRY": 10, "MELON": 10}
+
+
 def _first_yield_day(crop: str) -> int:
-    return {"WHEAT": 2, "CARROT": 2, "TOMATO": 8, "STRAWBERRY": 10, "MELON": 10}.get(crop, 2)
+    return FIRST_YIELD.get(crop, 2)
+
+
+def _crop_for(x: int, y: int) -> str:
+    """A fixed spatial rotation. Deterministic, so a tile always grows the same
+    thing and the four products come off the farm at a steady mix."""
+    return CROPS[(x + 2 * y) % len(CROPS)]
 
 
 def _step_toward(x: int, y: int, tx: int, ty: int) -> str:
@@ -71,12 +88,16 @@ def _tile_jobs(tiles, day: int) -> dict:
                     jobs["dig"].append((x, y))
                 elif kind == "PLANT":
                     age = day - tile.get("planted_day", day)
-                    ready = age >= _first_yield_day(tile.get("crop", CROP))
+                    ready = age >= _first_yield_day(tile.get("crop", "WHEAT"))
                     if ready and tile.get("yield_units", 0) > 0:
                         jobs["harvest"].append((x, y))
                     elif not tile.get("watered_today"):
                         jobs["water"].append((x, y))
     return jobs
+
+
+def jobs_empty_tiles(tiles) -> bool:
+    return any(t is None for row in tiles for t in row)
 
 
 def _nearest(pos, options):
@@ -93,30 +114,41 @@ def agent(obs, config=None):
     hour = obs["hour"]
 
     units = [tuple(me["farmer"])] + [tuple(p) for p in me.get("hands", [])]
-    inventories = private.get("inventories", [])
     seeds = private.get("seeds", {})
     shed = private.get("shed", {})
 
     market = []
+    prices = (obs.get("market") or {}).get("prices") or {}
+    shed_total = sum(v for v in shed.values() if v > 0)
 
-    # --- crew first: cheap, and it multiplies every later action -----------
-    if hour == 0:
-        for _ in range(HANDS_PER_DAY):
+    # --- crew, dribbled out: every HIRE is a market order and only ten are
+    #     processed per turn, so issuing nine at hour 0 drops the rest of the
+    #     queue behind them
+    hired = me.get("hires_today", 0)
+    if hired < TARGET_HANDS and money > 60:
+        for _ in range(min(HIRES_PER_TURN, TARGET_HANDS - hired)):
             market.append(["HIRE"])
 
-    # --- keep enough seed that a free unit is never idle -------------------
-    have = seeds.get(CROP, 0)
-    want = SEED_BUFFER + len(units)
-    if have < want and money > SEED_COST * 4:
-        affordable = min(want - have, max(0, (money - 200) // SEED_COST))
-        if affordable > 0:
-            market.append(["BUY_SEED", CROP, int(affordable)])
+    # --- land, once the farm is genuinely full
+    owned = len(me.get("unlocked_quadrants", ["NW"]))
+    if owned <= len(LAND_COSTS) and not jobs_empty_tiles(me["tiles"]):
+        if money > LAND_COSTS[owned - 1] + CASH_BUFFER * 4:
+            market.append(["BUY_LAND"])
 
-    # --- sell in batches: a glut prices itself to the floor ----------------
-    for item, count in sorted(shed.items()):
-        if item == "FERTILIZER" or count <= 0:
+    # --- keep a little seed of every crop so a free unit is never idle
+    for crop in CROPS:
+        if seeds.get(crop, 0) < 3 and money > SEED_COST[crop] * 6 + CASH_BUFFER:
+            market.append(["BUY_SEED", crop, 4])
+        if len(market) >= 7:
+            break
+
+    # --- sell only into a price still worth taking
+    pressure = shed_total >= SHED_PRESSURE
+    for item, count in sorted(shed.items(), key=lambda kv: -kv[1]):
+        if count <= 0 or len(market) >= 10:
             continue
-        market.append(["SELL", item, min(count, SELL_BATCH)])
+        if prices.get(item, 0) >= SELL_FLOOR.get(item, 20) or pressure:
+            market.append(["SELL", item, int(count)])
 
     jobs = _tile_jobs(me["tiles"], day)
     claimed: set = set()
@@ -124,18 +156,9 @@ def agent(obs, config=None):
     hand_ops = []
 
     for i, (x, y) in enumerate(units):
-        inv = inventories[i] if i < len(inventories) else {}
-        carrying = sum(v for k, v in inv.items() if v)
         tile = me["tiles"][y][x] if 0 <= y < len(me["tiles"]) else None
 
         op = None
-
-        # full hands go to the shed, otherwise the produce never becomes money
-        if carrying >= 6:
-            if (x, y) in SHED_TILES:
-                op = ["DROP"]
-            else:
-                op = [_step_toward(x, y, *_nearest((x, y), SHED_TILES))]
 
         if op is None and isinstance(tile, dict):
             kind = tile.get("kind")
@@ -143,13 +166,19 @@ def agent(obs, config=None):
                 op = ["DIG"]
             elif kind == "PLANT":
                 age = day - tile.get("planted_day", day)
-                if age >= _first_yield_day(tile.get("crop", CROP)) and tile.get("yield_units", 0) > 0:
+                if age >= _first_yield_day(tile.get("crop", "WHEAT")) and tile.get("yield_units", 0) > 0:
                     op = ["HARVEST"]
                 elif not tile.get("watered_today"):
                     op = ["WATER"]
 
-        if op is None and tile is None and seeds.get(CROP, 0) > 0:
-            op = ["PLANT", CROP]
+        if op is None and tile is None:
+            crop = _crop_for(x, y)
+            if seeds.get(crop, 0) > 0:
+                op = ["PLANT", crop]
+            else:
+                stocked = [c for c in CROPS if seeds.get(c, 0) > 0]
+                if stocked:
+                    op = ["PLANT", stocked[0]]
 
         if op is None:
             # head for the most valuable unclaimed job on the board

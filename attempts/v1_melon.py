@@ -25,17 +25,8 @@ SEED_COST = 80
 # only `maxMarketOrdersPerTurn` (10) are processed per turn — hiring twelve
 # fills the queue at hour 0 and silently drops that turn's seed purchase and
 # every sale behind it.
-# Five. Three was the optimum when the yardstick was coins against the built-in
-# starter; measured head-to-head against the previous agent — which is what the
-# ladder actually scores — five wins every game and three ties. Seven falls off
-# a cliff: the fib wage bill turns steep and the hires start crowding the
-# ten-order-per-turn market queue.
-HANDS_PER_DAY = 5
-# Twelve, not six. Batching was supposed to protect the melon price and the
-# earlier ablation already showed it did nothing for coin totals; head-to-head
-# it turns out selling *faster* wins, because in a contested market the melon
-# price is going to the floor either way and the first seller gets the good half.
-SELL_BATCH = 12
+HANDS_PER_DAY = 3
+SELL_BATCH = 6          # selling the whole shed at once craters the price
 SEED_BUFFER = 8
 
 SHED_TILES = [(4, 4), (5, 4), (4, 5), (5, 5)]

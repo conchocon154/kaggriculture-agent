@@ -7,98 +7,139 @@ An entry for [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture),
 a two-player farming sim: 30 days, 24 turns a day, and whoever has the most
 money at the end wins.
 
-**27,332 coins against the built-in `starter`'s ~3,500, from a starting bank of
-3,000.** What follows is which decisions earned that, measured one at a time,
-and the one condition under which most of it disappears.
+This started as "make the most coins". That was the wrong objective, and finding
+out why is most of what happened here.
 
-## What each decision is worth
+## The objective was wrong
 
-`scripts/ablate.py` reruns the agent with a single knob changed:
+The ladder is Elo-like and scores **wins and losses only** — the coin margin
+does not enter it, and opponents are drawn from near your own rating. So the
+question is never "how much money does this make against the built-in
+`starter`", it is "does this beat the agent it will actually be drawn against".
 
-| Variant | Final money | vs baseline |
-|---|---:|---:|
-| **baseline** (melon, 3 hands) | **27,332** | — |
-| no hired hands | 16,034 | **−11,298** |
-| 1 hand | 25,161 | −2,171 |
-| 6 hands | 26,161 | −1,171 |
-| 12 hands | 24,234 | −3,098 |
-| sell one unit at a time | 27,669 | +337 |
-| sell the whole shed at once | 27,244 | −88 |
-| wheat instead of melon | 8,012 | **−19,320** |
-| carrot instead of melon | 6,932 | **−20,400** |
+Those two questions have different answers. Measured head-to-head with seats
+alternated:
 
-Two decisions carry almost the entire result, and one that looks important
-carries nothing.
+| Agent | Coins vs `starter` | Record vs the previous version |
+|---|---:|---|
+| previous submission | **27,332** | — |
+| four-crop version | **29,161** | loses 1 of 6 |
+| **shipped** | 26,458 | **wins 10 of 10** |
 
-**Melon, and it is not close.** Wheat cycles in two days against melon's ten and
-its price decays gently under volume, which reads like the sensible staple.
-Melon is worth three times more. It sells for 250 against wheat's 25 and still
-clears six units a plant, and even after its own supply drives the price down —
-premium goods are the ones the price function punishes hardest — the gap is
-19,000 coins.
+The shipped agent makes *less money against a weak opponent* than either of the
+others and beats both of them every single game. Optimising the coin total was
+optimising the wrong number, and the version that looked best on it — four
+crops, price floors, land purchases, nine hands — is the one that loses.
 
-**Hiring, which is nearly free.** Hands cost `1, 1, 2, 3, 5, 8, …` and the
-counter resets every morning, so a crew for a whole day costs less than one
-melon seed. Not hiring costs 11,298 coins. The season is 720 turns and every
-unit acts on every turn, so the binding constraint is actions, not money.
+## What actually changed
 
-**Selling in batches, which I put in to protect the price, does nothing.**
-Dumping the whole shed at once costs 88 coins and selling one unit at a time
-*gains* 337. Both are inside the noise of a decision that mattered. The batching
-logic stays because it is harmless, but it is not why this works, and the README
-would be wrong to imply otherwise.
+Two parameters, each swept on its own and judged head-to-head against the
+previous submission rather than against `starter`:
 
-## Three hands, not twelve
+| Change | Record vs previous version |
+|---|---|
+| control (unchanged) | 6 ties |
+| **hands 3 → 5** | **6 wins, 0 losses** |
+| hands 6 | 6 wins, 0 losses |
+| hands 7 | 0 wins — falls off a cliff |
+| **sell batch 6 → 12** | **6 wins, 0 losses** |
+| sell batch 3 | 0 wins |
+| seed buffer 8 → 16 | 0 wins |
 
-More hands is better up to three and worse after:
+Five hands and a sell batch of twelve. Combined and run with alternating seats,
+that beats the previous agent 10–0 and beats the six-hand variant 8–0.
+
+**Selling faster wins, which is the opposite of what the batching was for.** The
+batch size went in to protect the melon price. An earlier ablation showed it did
+nothing to coin totals; head-to-head it turns out that in a contested market the
+price is going to the floor regardless, and the first seller gets the good half
+of the curve. Holding stock to protect a price only works if you are the only
+one selling.
+
+**Seven hands falls off a cliff.** The wage bill is `1, 1, 2, 3, 5, 8, 13, …`
+and reset daily, so it is trivial at five and steep by nine; on top of that
+every `HIRE` is a market order against a ten-per-turn cap, so a long hiring
+queue starts dropping that turn's sales.
+
+## What was tried and did not work
+
+Kept in [`attempts/`](attempts/) with the numbers, because two of them looked
+like improvements right up until they were measured properly.
+
+**Geese.** The price table makes this look obvious: melon decays as `sq` with an
+above-target of 3.60 and hits the $1 floor about 300 units past the start, while
+eggs decay as `log` at 0.20 and are still worth about $40 after six hundred
+sales. A goose lays daily forever and drops free fertiliser. Three versions of
+it, and none got off the ground — because `FEED` takes wheat out of **the acting
+unit's own inventory**, not the shed. Every goose needs a unit standing on it
+*carrying wheat*, every day, against an animal that escapes permanently after
+two missed feeds. The flock oscillated 6 → 4 → 5 → 3 while every coin earned
+went into replacing what had just starved.
+
+**Diversifying into four crops.** Scores highest against `starter` and loses
+head-to-head. Spreading production means producing fewer melons, which hands the
+high half of the melon curve to a specialist; and a price floor is a promise not
+to sell, which an opponent enforces on you by keeping the price beneath it.
+
+## The old measurement, and why it misled
+
+The first version of this README reported an ablation against `starter` — melon
+over wheat worth +19,320, hiring worth +11,298, batching worth nothing. Those
+numbers are still right about coins, and the crop and hiring findings still
+hold. The batching one was the tell: a change worth nothing in coins turned out
+to be worth every game head-to-head once it was pointed the other way.
+
+The old hand sweep, for the record:
 
 ```
 hands   0      1      2      3      4      5      6      7      8      9
 money  16554  25161  26081  27332  26398  26491  26161  26243  26419  25462
 ```
 
-The fall past three is not the wage bill — the wage bill is trivial. Every
-`HIRE` is a market order and only `maxMarketOrdersPerTurn` (10) are processed
-per player per turn. Twelve hires at hour 0 fill the queue and **silently drop
-that turn's seed purchase and every sale queued behind them**. The cost of
-over-hiring is paid in lost trades, not in wages. There is a test that keeps the
-order list inside the cap for exactly this reason.
+The fall past three there is the ten-order-per-turn market cap: twelve hires at
+hour 0 fill the queue and **silently drop that turn's seed purchase and every
+sale behind them**. A test keeps the order list inside the cap for this reason.
+Note that the head-to-head sweep puts the optimum at five, not three — the coin
+curve and the win curve peak in different places.
 
-## The limitation, which is large
+## The limitation, which is still large
 
-The score is *identical* against `starter`, `random` and `pass` — 27,332 every
-time. The opponent cannot touch it, because the only market this agent trades in
-is melon and none of those opponents sell melon.
+Against `starter`, `random` and `pass` the score barely moves, because none of
+them sell melon and so none of them can touch this agent's market. Against a
+copy of itself it roughly halves. The edge is not "melon is the best crop", it
+is "melon is the best crop while few others are selling one", and on a ladder
+full of melon farmers most of it goes away.
 
-Put it against itself:
+What the head-to-head work changed is that the agent is now tuned *for* the
+contested case rather than the empty one — selling faster rather than holding
+for a price is exactly the adjustment that matters when someone else is
+supplying the same market.
 
-| Match | Final money |
-|---|---:|
-| vs `starter` / `random` / `pass` | 27,332 |
-| **vs a copy of itself** | **11,061** |
+## On error bars
 
-**A 60% collapse.** The edge is not really "melon is the best crop" — it is
-"melon is the best crop while nobody else is selling one". Against a field that
-has also worked this out, the melon price craters and most of the advantage goes
-with it. It still beats the starter at 11,061, so the floor is not bad, but the
-headline number is a measurement taken in an empty market and should be read
-that way.
+Coin totals against a fixed opponent are exactly reproducible here: melon
+occupies a tile for ten of the thirty days, so the board is almost never empty
+and the one stochastic element that touches this strategy — weeds spawning on
+empty tiles — has nearly nothing to land on. The wheat variant is *not*
+deterministic (6,466–9,559 across runs) for the same reason in reverse.
 
-## Why the numbers have no error bars
-
-Every figure above is a single game, because with melon the result is exactly
-reproducible: 27,332 in every run, against every opponent. Melon occupies a tile
-for ten of the thirty days, so the board is almost never empty, and the only
-stochastic element that touches this strategy — weeds spawning on empty tiles —
-has nearly no surface to land on. The wheat variant is *not* deterministic
-(6,466–9,559 across runs) for the same reason in reverse: a two-day cycle leaves
-tiles bare constantly.
+Head-to-head records are not reproducible in that way, so those are run with
+**seats alternated**, because the two seats are not symmetric in a shared
+market. A round-robin at four games a pair came out non-transitive; at eight
+games with alternating seats it resolved cleanly. Four games was not enough,
+which is worth knowing before reading anything into a short series.
 
 ## Running it
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -U kaggle-environments pytest
+
+# the measurement that decides things: wins, with seats alternated
+.venv/bin/python scripts/head2head.py main.py attempts/v1_melon.py --games 10
+
+# coins against a fixed opponent — useful, but not what the ladder scores
 .venv/bin/python scripts/ablate.py --games 2
+
 .venv/bin/python -m pytest tests/ -q      # 22 tests
 ```
 
