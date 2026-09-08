@@ -55,3 +55,64 @@ keeping the price under it. Every variant tried (no floors, floors halved, shed
 pressure from 80 down to 12) still lost.
 
 This is the one worth remembering: it scores better and plays worse.
+
+---
+
+## Round two: reading the public meta
+
+The competition rules permit public code sharing and license anything shared
+that way under an OSI licence (§3.6.b), so the public notebooks are fair
+reading. Four were pulled and read; nothing was copied. The top agents turn out
+to be largely **distilled 720-turn tapes** replayed from leader replays rather
+than reactive logic, which is neither transferable nor mine to take.
+
+Sources read:
+
+| Notebook | What it established |
+|---|---|
+| [Rayk Kretzschmar — Findings from Zero to Top Meta](https://www.kaggle.com/code/raykkretzschmar/kaggriculture-findings-from-zero-to-top-meta) | The meta converges on ~8 cows, 6 sheep, 3 quadrants, 12 hands; the live edge is sale *timing*, not herd composition |
+| [Ryo Hasegawa — Submission Strategy](https://www.kaggle.com/competitions/kaggriculture/discussion/736219) | The ladder is Elo on wins and losses only; never re-submit an unchanged bot |
+| [SIDHAARTH SHREE — Documentation vs Engine Discrepancies](https://www.kaggle.com/competitions/kaggriculture/discussion/732450) | Fertiliser *is* sellable; a seed unwatered on its planting day is a weed by morning; DIG fails on occupied structures |
+| tetsu2131 — Shape the Shop, Work the Pasture | Mostly replay visualisation |
+
+Four things the meta says, each tested head-to-head against the shipped agent
+with seats alternated, six games apiece:
+
+| Meta advice | Result |
+|---|---|
+| hire ~10–12 hands, the fib region is cheap | 7, 9, 10, 12 and 14 hands all **lose 0–6** |
+| take three quadrants (NE + SW) | **loses 0–6** at every crew size tried |
+| bank produce earlier, since `SELL` only sees the shed | drop threshold 1, 2, 3, 4 and 12 all **lose**; 8 ties |
+| liquidate the shed in the closing turns | **ties** at steps 600, 660, 690 and 710 |
+
+None of it transfers, and the reason is coherent: twelve hands and three
+quadrants are one system with an eight-cow herd, which is what gives that many
+units something to do. Grafting the labour and the land onto a twenty-five-tile
+melon monoculture buys wage bills and land costs against work that does not
+exist. The terminal liquidation ties because the shed is already empty — this
+agent's sales keep pace with its harvest, so there was nothing left to dump.
+
+## v7 — the herd, a fourth time
+
+`v7_herd_on_melon.py`. Pastures on eight tiles beside the shed, cows bought from
+day 6 out of melon income, and — the fix for the failure in v2 — a **single
+pickup of twenty-five wheat** so one unit can service the whole herd for a day
+instead of walking back to the shed after every four.
+
+647 against `starter`. It also carried a plain ordering bug for a while
+(`jobs` used in the market block before it was computed, which killed the
+episode at day 6 with an `UnboundLocalError`); fixing that moved it from 208 to
+647, which is to say from broken to still broken. The melon pipeline collapses
+whenever the herd code is present and four attempts have not isolated why.
+
+## Where this leaves it
+
+Roughly thirty variants have now been measured head-to-head. The shipped agent
+wins every one of them. It is a local optimum for a melon monoculture, and the
+route past it is the herd architecture — which is worth another attempt with a
+dedicated keeper unit and a clean rewrite rather than a bolt-on, but not worth
+another bolt-on.
+
+Per Ryo Hasegawa's post, an unchanged agent should not be re-submitted: it
+retires a converged rating for a fresh one at 600 and changes nothing about the
+final Bradley-Terry ranking. So nothing was submitted this round.

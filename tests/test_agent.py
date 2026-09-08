@@ -105,6 +105,12 @@ def test_sells_in_batches_rather_than_dumping_the_shed():
 
 
 def test_does_not_sell_fertilizer():
+    """Not because it cannot: the docs say fertiliser is buy-only and the
+    engine's generic SELL path accepts it anyway (confirmed by Kaggle staff in
+    the competition's discrepancies thread). This agent keeps no animals, so it
+    never holds any — the skip is here to keep an empty SELL out of the
+    ten-order-per-turn queue, and it would have to come out the day a herd
+    lands."""
     a = agent(obs(shed={"FERTILIZER": 20}))
     assert not [o for o in a["market"] if o[0] == "SELL"]
 

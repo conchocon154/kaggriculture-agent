@@ -28,6 +28,10 @@ SEED_COST = 80
 HANDS_PER_DAY = 5
 SELL_BATCH = 12
 DROP_AT = 6             # how full a unit gets before it banks its load
+
+# Unsold stock scores nothing. In the closing turns the price no longer has a
+# future to protect, so the batch cap comes off and everything goes.
+LIQUIDATE_FROM_STEP = 690
 SEED_BUFFER = 8
 
 SHED_TILES = [(4, 4), (5, 4), (4, 5), (5, 5)]
@@ -105,10 +109,12 @@ def agent(obs, config=None):
             market.append(["BUY_SEED", CROP, int(affordable)])
 
     # --- sell in batches: a glut prices itself to the floor ----------------
+    liquidating = obs.get("step", 0) >= LIQUIDATE_FROM_STEP
     for item, count in sorted(shed.items()):
-        if item == "FERTILIZER" or count <= 0:
+        if count <= 0:
             continue
-        market.append(["SELL", item, min(count, SELL_BATCH)])
+        batch = count if liquidating else min(count, SELL_BATCH)
+        market.append(["SELL", item, int(batch)])
 
     jobs = _tile_jobs(me["tiles"], day)
     claimed: set = set()
