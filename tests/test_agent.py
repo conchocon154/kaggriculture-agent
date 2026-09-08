@@ -53,6 +53,20 @@ def plant(crop="MELON", day=0, watered=True, units=0, dry=0):
             "yield_units": units, "fertilized_until_day": -1}
 
 
+def econ(day=0, market=None, standing=None, money=3000):
+    """A fresh pricing context. Every valuation goes through one of these."""
+    return kagagent.Econ(market or {}, standing or {}, day, money)
+
+
+def tasks_for(tiles, day=0, seeds=None, shed=None, units=1, e=None,
+              animal=None, pen_budget=0, empty_pens=None, hungry=0.0,
+              stocked=0):
+    return kagagent.build_tasks(tiles, day, e or econ(day),
+                                seeds if seeds is not None else {"MELON": 9},
+                                shed or {}, units, hungry, stocked,
+                                animal, pen_budget, empty_pens or {})
+
+
 # --------------------------------------------------------------------------
 # the price curve, which the agent reimplements in order to plan
 # --------------------------------------------------------------------------
@@ -118,23 +132,22 @@ def test_sell_quantity_is_zero_when_the_market_is_already_below_reserve():
 # the planner: do not plant what cannot finish
 # --------------------------------------------------------------------------
 
-def test_crop_that_cannot_reach_first_yield_is_worth_nothing():
-    """A melon needs ten days. On day 20 the seed is eighty coins burnt."""
-    assert kagagent.crop_value("MELON", day=19, price_now=250) is not None
-    assert kagagent.crop_value("MELON", day=20, price_now=250) is None
-    assert kagagent.crop_value("WHEAT", day=27, price_now=25) is not None
-    assert kagagent.crop_value("WHEAT", day=28, price_now=25) is None
+def test_crop_that_cannot_reach_its_peak_is_worth_nothing():
+    """A melon reaches its cap at age ten. Planted on day 20 it is eighty
+    coins burnt, and the last four versions kept planting them to the bell."""
+    assert kagagent.crop_value("MELON", 19, econ(19)) is not None
+    assert kagagent.crop_value("MELON", 20, econ(20)) is None
+    assert kagagent.crop_value("WHEAT", 25, econ(25)) is not None
+    assert kagagent.crop_value("WHEAT", 26, econ(26)) is None
 
 
 def test_planner_switches_to_a_fast_crop_late_in_the_season():
-    early = kagagent.choose_crop(0, {"MELON": 250, "WHEAT": 25, "CARROT": 35})
-    late = kagagent.choose_crop(22, {"MELON": 250, "WHEAT": 25, "CARROT": 35})
-    assert early == "MELON"
-    assert late in ("WHEAT", "CARROT")
+    assert kagagent.best_crop(0, econ(0))[0] == "MELON"
+    assert kagagent.best_crop(22, econ(22))[0] in ("WHEAT", "CARROT")
 
 
 def test_planner_gives_up_when_nothing_can_finish():
-    assert kagagent.choose_crop(29, {"MELON": 250, "WHEAT": 25}) is None
+    assert kagagent.best_crop(29, econ(29))[0] is None
 
 
 def test_agent_stops_buying_seed_it_cannot_grow():
@@ -149,8 +162,9 @@ def test_agent_stops_buying_seed_it_cannot_grow():
 def test_a_plant_about_to_die_outranks_a_routine_watering():
     tiles = [[None] * 10 for _ in range(10)]
     tiles[0][0] = plant(watered=False, dry=1, units=4)   # one dry day already
-    tiles[0][1] = plant(watered=False, dry=0, day=0)     # merely thirsty
-    tasks = kagagent.build_tasks(tiles, 3, {"MELON": 250}, {"MELON": 5}, "MELON")
+    tiles[0][1] = plant(watered=False, dry=0, day=0)     # inside the window
+    tiles[0][1] = plant(watered=False, dry=0, day=-6)    # inside the window
+    tasks = tasks_for(tiles, 3, {"MELON": 5})
     at_risk = [t for t in tasks if (t[0], t[1]) == (0, 0) and t[2] == ["WATER"]]
     routine = [t for t in tasks if (t[0], t[1]) == (1, 0) and t[2] == ["WATER"]]
     assert at_risk and routine
@@ -161,32 +175,33 @@ def test_watering_inside_the_bonus_window_beats_watering_outside_it():
     lo, hi = kagagent.bonus_window("MELON")
     tiles = [[None] * 10 for _ in range(10)]
     tiles[0][0] = plant(watered=False, day=0)
-    inside = kagagent.build_tasks(tiles, lo, {"MELON": 250}, {}, None)
-    outside = kagagent.build_tasks(tiles, lo - 1, {"MELON": 250}, {}, None)
+    inside = tasks_for(tiles, lo, {})
+    outside = tasks_for(tiles, lo - 1, {})
     wi = [t[3] for t in inside if t[2] == ["WATER"]][0]
-    wo = [t[3] for t in outside if t[2] == ["WATER"]][0]
-    assert wi > wo
+    # Outside the window a healthy plant survives a skipped day, so there is
+    # nothing to price: the turn is worth more anywhere else on the board.
+    assert not [t for t in outside if t[2] == ["WATER"]]
+    assert wi > 0
 
 
 def test_harvest_is_priced_on_what_is_actually_on_the_plant():
     tiles = [[None] * 10 for _ in range(10)]
     tiles[0][0] = plant(day=0, units=6)
     tiles[0][1] = plant(day=0, units=1)
-    tasks = kagagent.build_tasks(tiles, 10, {"MELON": 250}, {}, None)
+    tasks = tasks_for(tiles, 10, {})
     big = [t[3] for t in tasks if (t[0], t[1]) == (0, 0) and t[2] == ["HARVEST"]][0]
     small = [t[3] for t in tasks if (t[0], t[1]) == (1, 0) and t[2] == ["HARVEST"]][0]
     assert big > small
 
 
 def test_no_plant_task_without_seed():
-    tasks = kagagent.build_tasks([[None] * 10 for _ in range(10)],
-                                 0, {"MELON": 250}, {"MELON": 0}, "MELON")
+    tasks = tasks_for([[None] * 10 for _ in range(10)], 0, {"MELON": 0})
     assert not [t for t in tasks if t[2][0] == "PLANT"]
 
 
 def test_locked_tiles_are_never_given_work():
     tiles = [["LOCKED"] * 10 for _ in range(10)]
-    assert kagagent.build_tasks(tiles, 0, {"MELON": 250}, {"MELON": 9}, "MELON") == []
+    assert tasks_for(tiles, 0) == []
 
 
 # --------------------------------------------------------------------------
@@ -247,9 +262,20 @@ def test_market_orders_stay_inside_the_per_turn_cap():
 
 
 def test_hires_at_the_start_of_the_day_and_not_after():
-    assert len([o for o in agent(obs(hour=0))["market"] if o[0] == "HIRE"]) \
-        == kagagent.HANDS_PER_DAY
+    assert [o for o in agent(obs(hour=0))["market"] if o[0] == "HIRE"]
     assert not [o for o in agent(obs(hour=9))["market"] if o[0] == "HIRE"]
+
+
+def test_hiring_stops_at_the_cap_and_at_the_wage_bill():
+    """A hand costs fib(n) for the day, so the bill accelerates. Sixteen hands
+    scored two thirds of what ten did — the marginal hand finds only the cheap
+    end of the board — and the budget is what holds the line."""
+    rich = kagagent.hires_wanted(money=10 ** 6, jobs=200, already=0)
+    assert rich == kagagent.MAX_HANDS
+    assert kagagent.hires_wanted(money=20, jobs=200, already=0) < rich
+    assert kagagent.hires_wanted(money=10 ** 6, jobs=3, already=0) == 3
+    assert kagagent.hires_wanted(money=10 ** 6, jobs=200,
+                                 already=kagagent.MAX_HANDS) == 0
 
 
 def test_a_loaded_unit_banks_its_load():
