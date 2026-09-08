@@ -201,10 +201,7 @@ def build_tasks(tiles, day, prices, seeds, plant_crop):
 # assignment: units to tasks, discounted by the walk
 # --------------------------------------------------------------------------
 
-# A step costs this share of a job's value. Tuned, not chosen: at 0.30 units
-# ignore distant work that is worth the walk; at 0.0 every unit sets off across
-# the board for the single richest job and the farm collapses to nothing.
-TRAVEL_COST = 0.05
+TRAVEL_COST = 0.14      # a step costs this share of a job's value
 
 
 def step_toward(x, y, tx, ty):
@@ -245,13 +242,10 @@ def assign(units, tasks):
 # --------------------------------------------------------------------------
 
 HANDS_PER_DAY = 5
-DROP_AT = 1              # banked produce is the only produce that can be sold
+DROP_AT = 6
 SEED_BUFFER = 8
 CASH_FLOOR = 120
-# Sell down to this share of base. Low on purpose: holding stock for a better
-# price only pays if nobody else is supplying the same market, and on a ladder
-# of farmers somebody always is.
-RESERVE_FRACTION = 0.25
+RESERVE_FRACTION = 0.42   # sell down to this share of the base price
 
 
 def agent(obs, config=None):

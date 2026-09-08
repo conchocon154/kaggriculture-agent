@@ -4,130 +4,84 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 An entry for [Kaggriculture](https://www.kaggle.com/competitions/kaggriculture),
-a two-player farming sim: 30 days, 24 turns a day, and whoever has the most
-money at the end wins.
+a two-player farming sim: 30 days, 24 turns a day, most coins wins.
 
-This started as "make the most coins". That was the wrong objective, and finding
-out why is most of what happened here.
+A scheduler rather than a rulebook. Every tile that wants work is priced in
+coins, every (unit, job) pair is discounted by the walk, and the pairs are
+matched against that score. Selling is priced the same way — the engine's price
+curve is published, so the order size is computed from it instead of guessed at.
 
-## The objective was wrong
+| | vs `starter` | vs the previous agent, seats alternated | mirror match |
+|---|---:|---|---:|
+| previous agent | 26,458 | — | 11,061 each |
+| **this one** | **34,118** | **10 wins, 0 losses** | **21,020 each** |
 
-The ladder is Elo-like and scores **wins and losses only** — the coin margin
-does not enter it, and opponents are drawn from near your own rating. So the
-question is never "how much money does this make against the built-in
-`starter`", it is "does this beat the agent it will actually be drawn against".
+The mirror-match number is the one that matters most. The old agent lost 60% of
+its bank when it met a copy of itself; this one loses about a third, because it
+no longer depends on being the only melon seller.
 
-Those two questions have different answers. Measured head-to-head with seats
-alternated:
+## Why a scheduler
 
-| Agent | Coins vs `starter` | Record vs the previous version |
-|---|---:|---|
-| previous submission | **27,332** | — |
-| four-crop version | **29,161** | loses 1 of 6 |
-| **shipped** | 26,458 | **wins 10 of 10** |
+The previous versions were priority lists — water before harvest, harvest before
+plant, walk to the nearest job in whichever category came first. That throws
+information away twice over. It cannot say that watering a melon on day 9 is
+worth more than harvesting a wheat, and it cannot say that a rich job three
+tiles away beats a dull one underfoot.
 
-The shipped agent makes *less money against a weak opponent* than either of the
-others and beats both of them every single game. Optimising the coin total was
-optimising the wrong number, and the version that looked best on it — four
-crops, price floors, land purchases, nine hands — is the one that loses.
+Pricing the jobs fixes both. A watering that saves a plant from becoming a weed
+is worth the whole plant; a watering inside the bonus window is worth one more
+melon; a watering outside it is worth almost nothing. Those are three different
+numbers, and a category ranking can only give them one.
 
-## What actually changed
+## The three pieces
 
-Two parameters, each swept on its own and judged head-to-head against the
-previous submission rather than against `starter`:
+**The price curve, reimplemented.** `price_at()` is the engine's published
+formula, so the agent can ask "what will the next melon fetch" rather than
+consulting a hand-set floor. `sell_quantity()` walks that curve forward and
+stops where the marginal unit drops below a reservation price. A test checks the
+reimplementation against the nine `P(I0−T)`, `P(I0+T)` and `P(I0+2T)` values the
+competition documents — if it ever drifts, every plan built on it is wrong.
 
-| Change | Record vs previous version |
+**A planner that knows the season ends.** A melon needs ten days to first yield,
+so one planted on day 20 is eighty coins set on fire. Every earlier version
+planted the same crop until the final turn. `crop_value()` returns `None` for a
+crop that cannot finish, and the planner falls back to wheat or carrot — two
+days to yield — for the tail of the season.
+
+**Greedy maximum-weight matching.** Every (unit, job) pair is scored once,
+sorted, and taken in order while both sides are free. It is the assignment
+problem solved greedily, which lands within a few percent of optimal and costs
+nothing — and that matters when it runs 720 times a game.
+
+## What the tuning found
+
+Each parameter swept alone, judged head-to-head against the untuned scheduler
+with seats alternated, six games apiece:
+
+| Change | Result |
 |---|---|
-| control (unchanged) | 6 ties |
-| **hands 3 → 5** | **6 wins, 0 losses** |
-| hands 6 | 6 wins, 0 losses |
-| hands 7 | 0 wins — falls off a cliff |
-| **sell batch 6 → 12** | **6 wins, 0 losses** |
-| sell batch 3 | 0 wins |
-| seed buffer 8 → 16 | 0 wins |
+| sell reserve 0.42 → **0.25** of base | 6–0 |
+| travel cost 0.14 → **0.05** | 6–0 |
+| bank a load at 6 items → **at 1** | 6–0 |
+| sell reserve 0.60, 0.80 | 0–6 |
+| travel cost 0.30 | 0–6 |
+| travel cost **0.0** | **0–6, and a score of zero** |
+| 3, 7, 9, 11, 13 hands | all lose to 5 |
 
-Five hands and a sell batch of twelve. Combined and run with alternating seats,
-that beats the previous agent 10–0 and beats the six-hand variant 8–0.
+Two of those are worth stating plainly.
 
-**Selling faster wins, which is the opposite of what the batching was for.** The
-batch size went in to protect the melon price. An earlier ablation showed it did
-nothing to coin totals; head-to-head it turns out that in a contested market the
-price is going to the floor regardless, and the first seller gets the good half
-of the curve. Holding stock to protect a price only works if you are the only
-one selling.
+**Bank produce immediately.** `SELL` spends from the shed and `HARVEST` fills a
+unit's pack, so produce sitting in a pack is not money yet. Walking it in after
+a single item beats hoarding six — the walk costs less than the delay.
 
-**Seven hands falls off a cliff.** The wage bill is `1, 1, 2, 3, 5, 8, 13, …`
-and reset daily, so it is trivial at five and steep by nine; on top of that
-every `HIRE` is a market order against a ten-per-turn cap, so a long hiring
-queue starts dropping that turn's sales.
+**Zero travel cost scores zero.** With no distance discount every unit sets off
+across the board for the single richest job, nobody arrives, and the farm
+produces nothing. It is a good reminder that the discount is not a tie-breaker,
+it is what makes the matching local enough to act on.
 
-## What was tried and did not work
-
-Kept in [`attempts/`](attempts/) with the numbers, because two of them looked
-like improvements right up until they were measured properly.
-
-**Geese.** The price table makes this look obvious: melon decays as `sq` with an
-above-target of 3.60 and hits the $1 floor about 300 units past the start, while
-eggs decay as `log` at 0.20 and are still worth about $40 after six hundred
-sales. A goose lays daily forever and drops free fertiliser. Three versions of
-it, and none got off the ground — because `FEED` takes wheat out of **the acting
-unit's own inventory**, not the shed. Every goose needs a unit standing on it
-*carrying wheat*, every day, against an animal that escapes permanently after
-two missed feeds. The flock oscillated 6 → 4 → 5 → 3 while every coin earned
-went into replacing what had just starved.
-
-**Diversifying into four crops.** Scores highest against `starter` and loses
-head-to-head. Spreading production means producing fewer melons, which hands the
-high half of the melon curve to a specialist; and a price floor is a promise not
-to sell, which an opponent enforces on you by keeping the price beneath it.
-
-## The old measurement, and why it misled
-
-The first version of this README reported an ablation against `starter` — melon
-over wheat worth +19,320, hiring worth +11,298, batching worth nothing. Those
-numbers are still right about coins, and the crop and hiring findings still
-hold. The batching one was the tell: a change worth nothing in coins turned out
-to be worth every game head-to-head once it was pointed the other way.
-
-The old hand sweep, for the record:
-
-```
-hands   0      1      2      3      4      5      6      7      8      9
-money  16554  25161  26081  27332  26398  26491  26161  26243  26419  25462
-```
-
-The fall past three there is the ten-order-per-turn market cap: twelve hires at
-hour 0 fill the queue and **silently drop that turn's seed purchase and every
-sale behind them**. A test keeps the order list inside the cap for this reason.
-Note that the head-to-head sweep puts the optimum at five, not three — the coin
-curve and the win curve peak in different places.
-
-## The limitation, which is still large
-
-Against `starter`, `random` and `pass` the score barely moves, because none of
-them sell melon and so none of them can touch this agent's market. Against a
-copy of itself it roughly halves. The edge is not "melon is the best crop", it
-is "melon is the best crop while few others are selling one", and on a ladder
-full of melon farmers most of it goes away.
-
-What the head-to-head work changed is that the agent is now tuned *for* the
-contested case rather than the empty one — selling faster rather than holding
-for a price is exactly the adjustment that matters when someone else is
-supplying the same market.
-
-## On error bars
-
-Coin totals against a fixed opponent are exactly reproducible here: melon
-occupies a tile for ten of the thirty days, so the board is almost never empty
-and the one stochastic element that touches this strategy — weeds spawning on
-empty tiles — has nearly nothing to land on. The wheat variant is *not*
-deterministic (6,466–9,559 across runs) for the same reason in reverse.
-
-Head-to-head records are not reproducible in that way, so those are run with
-**seats alternated**, because the two seats are not symmetric in a shared
-market. A round-robin at four games a pair came out non-transitive; at eight
-games with alternating seats it resolved cleanly. Four games was not enough,
-which is worth knowing before reading anything into a short series.
+Hiring stays at five. The wage bill is `1, 1, 2, 3, 5, 8, 13, …` reset daily, so
+it is trivial at five and steep by nine, and every `HIRE` competes with sales
+for the ten market orders a turn.
 
 ## Running it
 
@@ -135,33 +89,36 @@ which is worth knowing before reading anything into a short series.
 python3 -m venv .venv && .venv/bin/pip install -U kaggle-environments pytest
 
 # the measurement that decides things: wins, with seats alternated
-.venv/bin/python scripts/head2head.py main.py attempts/v1_melon.py --games 10
+.venv/bin/python scripts/head2head.py main.py attempts/v6_melon_tuned.py --games 10
 
-# coins against a fixed opponent — useful, but not what the ladder scores
-.venv/bin/python scripts/ablate.py --games 2
-
-.venv/bin/python -m pytest tests/ -q      # 22 tests
+.venv/bin/python -m pytest tests/ -q      # 33 tests
 ```
 
-A game takes about a second and a half.
+Seats are alternated because the two players are not symmetric in a shared
+market. A four-game round robin between three variants once came out
+non-transitive; it only resolved at eight games with alternating seats.
 
 ## Submitting
 
-The submission is `main.py` with an `agent` function at the root:
-
 ```bash
-kaggle competitions submit kaggriculture -f main.py -m "melon loop, 3 hands"
+kaggle competitions submit kaggriculture -f main.py -m "..."
 ```
 
-## Tests
+The ladder is Elo on **wins and losses only** — the coin margin never enters it,
+and opponents are drawn from near your own rating. An earlier version of this
+agent scored *higher* against `starter` than the one that replaced it and lost
+every head-to-head game, which is the whole reason the tuning above is measured
+the way it is.
 
-The game is slow to simulate, so the tests drive the agent with hand-built
-observations instead. What they pin down is the shape of the action dict — a
-malformed one is a silent no-op for a whole turn, which is expensive and
-invisible — and the rules the ablation showed actually matter: that hiring
-happens at hour 0 and not again, that the market list stays inside the ten-order
-cap, that a full unit walks to the shed and drops there, and that two idle units
-do not walk to the same tile.
+## What did not work
+
+[`attempts/`](attempts/) keeps seven earlier versions with their numbers, and
+[`attempts/README.md`](attempts/README.md) says why each failed. The short list:
+four attempts at an animal herd, all of which collapsed on the fact that `FEED`
+takes wheat from the acting unit's own inventory rather than the shed; and a
+four-crop diversified farm that scores highest against `starter` and loses
+head-to-head, because spreading production hands the top of the melon price
+curve to a specialist.
 
 ## Licence
 

@@ -1,14 +1,17 @@
-"""Tests for the agent's decisions.
+"""Tests for the scheduler.
 
-The game is slow to simulate, so these drive the agent with hand-built
-observations. What is worth pinning down is the shape of the action dict (a
-malformed one is a silent no-op for a whole turn, which is expensive and
-invisible) and the handful of rules the ablation showed actually matter.
+The game is slow to simulate, so these drive the pieces directly and the agent
+with hand-built observations. Three things are worth pinning down: that the
+reimplemented price curve still matches the engine's, that the planner refuses
+to buy a seed that cannot finish the season, and that the action dict keeps its
+shape — a malformed one is a silent no-op for a whole turn, which is expensive
+and invisible.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 from pathlib import Path
 
@@ -21,186 +24,269 @@ sys.modules["kagagent"] = kagagent
 spec.loader.exec_module(kagagent)
 
 agent = kagagent.agent
+I0 = kagagent.I0
 
 
 def obs(tiles=None, farmer=(0, 0), hands=(), money=3000, day=0, hour=5,
-        seeds=None, shed=None, inventories=None):
-    size = 10
+        seeds=None, shed=None, inventories=None, prices=None, inventory=None):
     if tiles is None:
-        tiles = [[None if x < 5 and y < 5 else "LOCKED"
-                  for x in range(size)] for y in range(size)]
+        tiles = [[None if x < 5 and y < 5 else "LOCKED" for x in range(10)]
+                 for y in range(10)]
     return {
-        "player": 0,
-        "day": day,
-        "hour": hour,
+        "player": 0, "day": day, "hour": hour, "step": day * 24 + hour,
         "farms": [{"money": money, "tiles": tiles, "farmer": list(farmer),
                    "hands": [list(h) for h in hands],
                    "unlocked_quadrants": ["NW"], "hires_today": 0}],
         "private": {
             "shed": shed or {},
-            "seeds": seeds if seeds is not None else {kagagent.CROP: 5},
+            "seeds": seeds if seeds is not None else {"MELON": 9},
             "inventories": inventories or [{} for _ in range(1 + len(hands))],
         },
-        "market": {"inventory": {}, "prices": {}},
+        "market": {"inventory": inventory or {}, "prices": prices or {}},
         "town": {"unlocked_shops": []},
     }
 
 
-def plant_tile(day=0, watered=False, yield_units=0, crop=None):
-    return {"kind": "PLANT", "crop": crop or kagagent.CROP, "planted_day": day,
-            "watered_today": watered, "consecutive_unwatered": 0,
-            "yield_units": yield_units, "fertilized_until_day": -1}
+def plant(crop="MELON", day=0, watered=True, units=0, dry=0):
+    return {"kind": "PLANT", "crop": crop, "planted_day": day,
+            "watered_today": watered, "consecutive_unwatered": dry,
+            "yield_units": units, "fertilized_until_day": -1}
 
 
 # --------------------------------------------------------------------------
-# shape — a malformed action costs a whole turn, silently
+# the price curve, which the agent reimplements in order to plan
 # --------------------------------------------------------------------------
 
-def test_action_has_the_three_required_keys():
-    a = agent(obs())
+def test_price_matches_the_published_table():
+    """The competition documents P(I0-T), P(I0+T) and P(I0+2T) per resource.
+    If the reimplementation drifts from those, every plan built on it is wrong."""
+    expected = {
+        "WHEAT":      (45, 20, 19),
+        "CARROT":     (70, 10, 1),
+        "TOMATO":     (84, 24, 9),
+        "STRAWBERRY": (204, 1, 1),
+        "MELON":      (300, 1, 1),
+        "EGG":        (70, 40, 39),
+        "MILK":       (256, 1, 1),
+        "WOOL":       (240, 1, 1),
+        "FERTILIZER": (140, 60, 20),
+    }
+    for item, (below, above, above2) in expected.items():
+        T = kagagent.MARKET[item][1]
+        assert kagagent.price_at(item, I0 - T) == below, item
+        assert kagagent.price_at(item, I0 + T) == above, item
+        assert kagagent.price_at(item, I0 + 2 * T) == above2, item
+
+
+def test_price_is_base_at_the_starting_inventory():
+    for item, params in kagagent.MARKET.items():
+        assert kagagent.price_at(item, I0) == params[0], item
+
+
+def test_price_never_goes_below_the_floor():
+    assert kagagent.price_at("MELON", I0 + 10_000) == 1
+
+
+def test_price_falls_as_inventory_grows():
+    prev = kagagent.price_at("MELON", I0)
+    for extra in range(50, 400, 50):
+        cur = kagagent.price_at("MELON", I0 + extra)
+        assert cur <= prev
+        prev = cur
+
+
+# --------------------------------------------------------------------------
+# order sizing off that curve
+# --------------------------------------------------------------------------
+
+def test_sell_quantity_stops_at_the_reservation_price():
+    n = kagagent.sell_quantity("MELON", I0, have=500, reserve=100)
+    assert 0 < n < 500
+    assert kagagent.price_at("MELON", I0 + n - 1) >= 100
+    assert kagagent.price_at("MELON", I0 + n) < 100
+
+
+def test_sell_quantity_never_exceeds_what_is_held():
+    assert kagagent.sell_quantity("WHEAT", I0, have=3, reserve=1) == 3
+
+
+def test_sell_quantity_is_zero_when_the_market_is_already_below_reserve():
+    assert kagagent.sell_quantity("MELON", I0 + 5000, have=50, reserve=100) == 0
+
+
+# --------------------------------------------------------------------------
+# the planner: do not plant what cannot finish
+# --------------------------------------------------------------------------
+
+def test_crop_that_cannot_reach_first_yield_is_worth_nothing():
+    """A melon needs ten days. On day 20 the seed is eighty coins burnt."""
+    assert kagagent.crop_value("MELON", day=19, price_now=250) is not None
+    assert kagagent.crop_value("MELON", day=20, price_now=250) is None
+    assert kagagent.crop_value("WHEAT", day=27, price_now=25) is not None
+    assert kagagent.crop_value("WHEAT", day=28, price_now=25) is None
+
+
+def test_planner_switches_to_a_fast_crop_late_in_the_season():
+    early = kagagent.choose_crop(0, {"MELON": 250, "WHEAT": 25, "CARROT": 35})
+    late = kagagent.choose_crop(22, {"MELON": 250, "WHEAT": 25, "CARROT": 35})
+    assert early == "MELON"
+    assert late in ("WHEAT", "CARROT")
+
+
+def test_planner_gives_up_when_nothing_can_finish():
+    assert kagagent.choose_crop(29, {"MELON": 250, "WHEAT": 25}) is None
+
+
+def test_agent_stops_buying_seed_it_cannot_grow():
+    late = agent(obs(day=28, seeds={}))
+    assert not [o for o in late["market"] if o[0] == "BUY_SEED"]
+
+
+# --------------------------------------------------------------------------
+# task pricing
+# --------------------------------------------------------------------------
+
+def test_a_plant_about_to_die_outranks_a_routine_watering():
+    tiles = [[None] * 10 for _ in range(10)]
+    tiles[0][0] = plant(watered=False, dry=1, units=4)   # one dry day already
+    tiles[0][1] = plant(watered=False, dry=0, day=0)     # merely thirsty
+    tasks = kagagent.build_tasks(tiles, 3, {"MELON": 250}, {"MELON": 5}, "MELON")
+    at_risk = [t for t in tasks if (t[0], t[1]) == (0, 0) and t[2] == ["WATER"]]
+    routine = [t for t in tasks if (t[0], t[1]) == (1, 0) and t[2] == ["WATER"]]
+    assert at_risk and routine
+    assert at_risk[0][3] > routine[0][3]
+
+
+def test_watering_inside_the_bonus_window_beats_watering_outside_it():
+    lo, hi = kagagent.bonus_window("MELON")
+    tiles = [[None] * 10 for _ in range(10)]
+    tiles[0][0] = plant(watered=False, day=0)
+    inside = kagagent.build_tasks(tiles, lo, {"MELON": 250}, {}, None)
+    outside = kagagent.build_tasks(tiles, lo - 1, {"MELON": 250}, {}, None)
+    wi = [t[3] for t in inside if t[2] == ["WATER"]][0]
+    wo = [t[3] for t in outside if t[2] == ["WATER"]][0]
+    assert wi > wo
+
+
+def test_harvest_is_priced_on_what_is_actually_on_the_plant():
+    tiles = [[None] * 10 for _ in range(10)]
+    tiles[0][0] = plant(day=0, units=6)
+    tiles[0][1] = plant(day=0, units=1)
+    tasks = kagagent.build_tasks(tiles, 10, {"MELON": 250}, {}, None)
+    big = [t[3] for t in tasks if (t[0], t[1]) == (0, 0) and t[2] == ["HARVEST"]][0]
+    small = [t[3] for t in tasks if (t[0], t[1]) == (1, 0) and t[2] == ["HARVEST"]][0]
+    assert big > small
+
+
+def test_no_plant_task_without_seed():
+    tasks = kagagent.build_tasks([[None] * 10 for _ in range(10)],
+                                 0, {"MELON": 250}, {"MELON": 0}, "MELON")
+    assert not [t for t in tasks if t[2][0] == "PLANT"]
+
+
+def test_locked_tiles_are_never_given_work():
+    tiles = [["LOCKED"] * 10 for _ in range(10)]
+    assert kagagent.build_tasks(tiles, 0, {"MELON": 250}, {"MELON": 9}, "MELON") == []
+
+
+# --------------------------------------------------------------------------
+# assignment
+# --------------------------------------------------------------------------
+
+def test_each_unit_and_each_task_is_used_at_most_once():
+    units = [(0, 0), (1, 1), (2, 2)]
+    tasks = [(0, 0, ["WATER"], 10.0), (4, 4, ["WATER"], 12.0),
+             (2, 2, ["HARVEST"], 30.0)]
+    out = kagagent.assign(units, tasks)
+    assert len(set(out.values())) == len(out)
+    assert set(out) <= set(range(len(units)))
+
+
+def test_the_walk_is_priced_in():
+    """Same value, different distance: the near one wins."""
+    units = [(0, 0)]
+    tasks = [(9, 9, ["HARVEST"], 100.0), (0, 0, ["HARVEST"], 100.0)]
+    assert kagagent.assign(units, tasks)[0] == 1
+
+
+def test_a_rich_job_is_still_worth_a_walk():
+    units = [(0, 0)]
+    tasks = [(3, 0, ["HARVEST"], 500.0), (0, 0, ["WATER"], 3.0)]
+    assert kagagent.assign(units, tasks)[0] == 0
+
+
+def test_more_units_than_tasks_leaves_units_unassigned():
+    out = kagagent.assign([(0, 0), (1, 1)], [(0, 0, ["WATER"], 5.0)])
+    assert len(out) == 1
+
+
+# --------------------------------------------------------------------------
+# the action dict
+# --------------------------------------------------------------------------
+
+def test_action_shape():
+    a = agent(obs(hands=[(1, 1), (2, 2)]))
     assert set(a) == {"farmer", "hands", "market"}
     assert isinstance(a["farmer"], list) and a["farmer"]
-    assert isinstance(a["hands"], list)
-    assert isinstance(a["market"], list)
-
-
-def test_one_op_per_hired_hand_in_order():
-    a = agent(obs(hands=[(1, 1), (2, 2), (3, 3)]))
-    assert len(a["hands"]) == 3
-    assert all(isinstance(op, list) and op for op in a["hands"])
+    assert len(a["hands"]) == 2
 
 
 def test_every_op_is_a_known_verb():
     verbs = {"NORTH", "SOUTH", "EAST", "WEST", "PASS", "PLANT", "WATER",
-             "HARVEST", "FERTILIZE", "DIG", "DROP", "PICKUP", "PLACE",
-             "BUILD_COOP", "BUILD_PASTURE", "FEED", "CARE", "COLLECT_FERTILIZER"}
+             "HARVEST", "FERTILIZE", "DIG", "DROP", "PICKUP", "PLACE"}
     a = agent(obs(hands=[(1, 1), (2, 2)]))
     for op in [a["farmer"], *a["hands"]]:
         assert op[0] in verbs, op
 
 
-# --------------------------------------------------------------------------
-# the rules the ablation showed matter
-# --------------------------------------------------------------------------
+def test_market_orders_stay_inside_the_per_turn_cap():
+    """Only ten are processed a turn and the rest vanish silently; hour 0 with
+    a full shed is when the queue is most likely to overflow."""
+    a = agent(obs(hour=0, shed={k: 40 for k in kagagent.MARKET}))
+    assert len(a["market"]) <= kagagent.MAX_ORDERS
+
 
 def test_hires_at_the_start_of_the_day_and_not_after():
-    morning = [o for o in agent(obs(hour=0))["market"] if o[0] == "HIRE"]
-    assert len(morning) == kagagent.HANDS_PER_DAY
-
-    later = [o for o in agent(obs(hour=7))["market"] if o[0] == "HIRE"]
-    assert later == [], "hiring again mid-day wastes market orders"
+    assert len([o for o in agent(obs(hour=0))["market"] if o[0] == "HIRE"]) \
+        == kagagent.HANDS_PER_DAY
+    assert not [o for o in agent(obs(hour=9))["market"] if o[0] == "HIRE"]
 
 
-def test_market_orders_stay_inside_the_per_turn_cap():
-    """Only 10 orders are processed per turn; the rest are dropped in silence.
-    Hiring at hour 0 is the moment the queue is most likely to overflow."""
-    a = agent(obs(hour=0, shed={"MELON": 40, "WHEAT": 10, "CARROT": 10}))
-    assert len(a["market"]) <= 10, a["market"]
+def test_a_loaded_unit_banks_its_load():
+    """SELL spends from the shed, so produce in a pack is not yet money."""
+    full = [{"MELON": kagagent.DROP_AT}]
+    walking = agent(obs(farmer=(0, 0), inventories=full))
+    assert walking["farmer"][0] in {"SOUTH", "EAST"}
+    assert agent(obs(farmer=(4, 4), inventories=full))["farmer"] == ["DROP"]
 
 
-def test_sells_in_batches_rather_than_dumping_the_shed():
-    a = agent(obs(shed={kagagent.CROP: 50}))
-    sells = [o for o in a["market"] if o[0] == "SELL"]
-    assert sells and sells[0][2] == kagagent.SELL_BATCH
+def test_everything_is_sold_on_the_last_day():
+    """Unsold stock scores nothing, so the reservation price stops applying."""
+    a = agent(obs(day=kagagent.LAST_DAY, shed={"MELON": 40},
+                  inventory={"MELON": I0 + 4000}))
+    sells = [o for o in a["market"] if o[0] == "SELL" and o[1] == "MELON"]
+    assert sells and sells[0][2] == 40
 
 
-def test_does_not_sell_fertilizer():
-    """Not because it cannot: the docs say fertiliser is buy-only and the
-    engine's generic SELL path accepts it anyway (confirmed by Kaggle staff in
-    the competition's discrepancies thread). This agent keeps no animals, so it
-    never holds any — the skip is here to keep an empty SELL out of the
-    ten-order-per-turn queue, and it would have to come out the day a herd
-    lands."""
-    a = agent(obs(shed={"FERTILIZER": 20}))
-    assert not [o for o in a["market"] if o[0] == "SELL"]
+def test_holds_stock_when_the_price_is_under_water_mid_season():
+    a = agent(obs(day=5, shed={"MELON": 40}, inventory={"MELON": I0 + 4000}))
+    assert not [o for o in a["market"] if o[0] == "SELL" and o[1] == "MELON"]
 
-
-def test_buys_seed_when_short_and_not_when_stocked():
-    short = agent(obs(seeds={kagagent.CROP: 0}))
-    assert any(o[0] == "BUY_SEED" for o in short["market"])
-
-    stocked = agent(obs(seeds={kagagent.CROP: 99}))
-    assert not any(o[0] == "BUY_SEED" for o in stocked["market"])
-
-
-def test_does_not_spend_its_last_coins_on_seed():
-    a = agent(obs(money=30, seeds={kagagent.CROP: 0}))
-    assert not any(o[0] == "BUY_SEED" for o in a["market"])
-
-
-# --------------------------------------------------------------------------
-# tile decisions
-# --------------------------------------------------------------------------
-
-def test_plants_on_an_empty_unlocked_tile():
-    assert agent(obs())["farmer"] == ["PLANT", kagagent.CROP]
-
-
-def test_waters_an_unwatered_plant_before_anything_else():
-    tiles = [[None] * 10 for _ in range(10)]
-    tiles[0][0] = plant_tile(watered=False)
-    assert agent(obs(tiles=tiles))["farmer"] == ["WATER"]
-
-
-def test_harvests_once_the_crop_is_ready():
-    ready = kagagent._first_yield_day(kagagent.CROP)
-    tiles = [[None] * 10 for _ in range(10)]
-    tiles[0][0] = plant_tile(day=0, watered=True, yield_units=4)
-    assert agent(obs(tiles=tiles, day=ready))["farmer"] == ["HARVEST"]
-
-
-def test_does_not_harvest_before_the_first_yield_day():
-    tiles = [[None] * 10 for _ in range(10)]
-    tiles[0][0] = plant_tile(day=0, watered=True, yield_units=4)
-    assert agent(obs(tiles=tiles, day=1))["farmer"] != ["HARVEST"]
-
-
-def test_digs_a_weed():
-    tiles = [[None] * 10 for _ in range(10)]
-    tiles[0][0] = {"kind": "WEED"}
-    assert agent(obs(tiles=tiles))["farmer"] == ["DIG"]
-
-
-def test_a_full_unit_heads_for_the_shed_and_drops_there():
-    tiles = [[None] * 10 for _ in range(10)]
-    full = [{kagagent.CROP: 9}]
-
-    walking = agent(obs(tiles=tiles, farmer=(0, 0), inventories=full))
-    assert walking["farmer"][0] in {"SOUTH", "EAST"}, walking["farmer"]
-
-    at_shed = agent(obs(tiles=tiles, farmer=(4, 4), inventories=full))
-    assert at_shed["farmer"] == ["DROP"]
-
-
-def test_never_acts_on_a_locked_tile():
-    """Tile actions no-op on locked ground, so spending a turn there is waste."""
-    tiles = [[("LOCKED" if (x >= 5 or y >= 5) else None)
-              for x in range(10)] for y in range(10)]
-    a = agent(obs(tiles=tiles, farmer=(7, 7)))
-    assert a["farmer"][0] in kagagent.MOVES or a["farmer"] == ["PASS"]
-
-
-# --------------------------------------------------------------------------
-# helpers
-# --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("start,target,expected", [
-    ((0, 0), (0, 3), "SOUTH"),
-    ((0, 3), (0, 0), "NORTH"),
-    ((0, 0), (3, 0), "EAST"),
-    ((3, 0), (0, 0), "WEST"),
+    ((0, 0), (0, 3), "SOUTH"), ((0, 3), (0, 0), "NORTH"),
+    ((0, 0), (3, 0), "EAST"), ((3, 0), (0, 0), "WEST"),
     ((2, 2), (2, 2), "PASS"),
 ])
 def test_step_toward(start, target, expected):
-    assert kagagent._step_toward(*start, *target) == expected
+    assert kagagent.step_toward(*start, *target) == expected
 
 
-def test_two_units_do_not_walk_to_the_same_tile():
-    """Without claiming, every idle unit converges on the same nearest job."""
-    tiles = [[plant_tile(watered=True, yield_units=0) for _ in range(10)]
-             for _ in range(10)]
-    tiles[0][4] = None
-    tiles[4][0] = None
-    a = agent(obs(tiles=tiles, farmer=(2, 2), hands=[(2, 2)],
-                  seeds={kagagent.CROP: 0}))
-    assert a["farmer"] != a["hands"][0] or a["farmer"] == ["PASS"]
+def test_shape_functions_agree_with_the_engine():
+    assert kagagent._shape("linear", 4, 10) == 4
+    assert kagagent._shape("sq", 4, 10) == 16
+    assert kagagent._shape("sqrt", 9, 10) == 3
+    assert kagagent._shape("log", 0, 10) == 0
+    assert kagagent._shape("hinge", 10, 10) == pytest.approx(1.0)
+    assert kagagent._shape("hinge", 20, 10) == pytest.approx(2 + 8 * 1.0)
+    assert kagagent._shape("sqrt", -5, 10) == 0        # clamped at zero
