@@ -110,6 +110,52 @@ agent scored *higher* against `starter` than the one that replaced it and lost
 every head-to-head game, which is the whole reason the tuning above is measured
 the way it is.
 
+## The herd, priced properly
+
+Animals are now in the same price table as everything else — `FEED`, `HARVEST`,
+`COLLECT_FERTILIZER`, `CARE` and `BUILD_PASTURE` are jobs with coin values, and
+`animal_value()` sums an animal's product income, its free fertiliser and its
+feed bill over the days it has left.
+
+With that arithmetic in place the answer is that **a 25-tile farm should not
+keep animals**:
+
+| Tile use | Coins per tile-day, day 0 |
+|---|---:|
+| **melon** | **74.5** |
+| cow | 48.1 |
+| goose | 43.4 |
+| sheep | 41.8 |
+
+That comparison is the whole point, and getting it wrong is what cost the four
+earlier attempts. `crop_value` is a total over ten days and `animal_value` a
+total over the remaining season — on raw totals a cow looks worth twice a melon,
+and the farm covers itself in pens it cannot afford to stock. Divided by the
+days each occupies a tile, the melon is comfortably ahead. There is a test that
+asserts both halves of that, because the raw-total version *looks* right.
+
+So the herd branch is present and dormant. It arms itself only if the melon
+price collapses far enough that a pasture genuinely pays more per tile-day —
+which on a ladder full of melon farmers is a real possibility, and locally is
+not. Measured against the crops-only agent over eight games with seats
+alternated it goes 0–2 with **six ties**: it mostly does not fire, and where it
+does it costs a little.
+
+Fixing that comparison also surfaced a quieter bug. Wheat is the crop this
+plants once melon can no longer finish the season — and the herd code was
+treating all wheat as feed, so late-season wheat sat in packs, never banked and
+never sold. It is only feed while there is something to feed.
+
+### Two submissions, on purpose
+
+The ladder keeps the two most recent submissions and both enter the final
+tournament, so the second slot is for a hedge rather than a copy:
+
+| Slot | Agent |
+|---|---|
+| crops-only scheduler | the measured best here |
+| herd-capable scheduler | identical unless melon is contested hard enough to flip the arithmetic |
+
 ## What did not work
 
 [`attempts/`](attempts/) keeps seven earlier versions with their numbers, and

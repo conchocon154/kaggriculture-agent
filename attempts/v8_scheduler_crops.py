@@ -49,12 +49,6 @@ MARKET = {
     "WOOL":       (200, 105, "log",    0.20, "sq",     3.20),
     "FERTILIZER": (100, 200, "linear", 0.40, "linear", 0.40),
 }
-ANIMALS = {
-    "GOOSE": {"cost": 300, "pen": "COOP",    "first": 4, "interval": 1, "product": "EGG"},
-    "COW":   {"cost": 400, "pen": "PASTURE", "first": 8, "interval": 2, "product": "MILK"},
-    "SHEEP": {"cost": 500, "pen": "PASTURE", "first": 6, "interval": 3, "product": "WOOL"},
-}
-
 I0 = 10000
 HINGE_GAIN = 8.0
 LAST_DAY = 29
@@ -130,64 +124,6 @@ def crop_value(crop, day, price_now):
     return c["max_yield"] * price_now * GLUT_HAIRCUT - c["seed"]
 
 
-def animal_value(kind, day, prices):
-    """Coins an animal bought today returns over the rest of the season.
-
-    Two income streams, and the second is the one that is easy to miss: the
-    product, whose price collapses under volume for milk and wool, and one
-    fertiliser a day per animal, which arrives whether or not the animal was
-    fed and whose price barely moves. Against that, the purchase and a wheat a
-    day in feed.
-    """
-    a = ANIMALS.get(kind)
-    if not a:
-        return None
-    producing_days = LAST_DAY - day - a["first"]
-    if producing_days <= 0:
-        return None
-    alive_days = LAST_DAY - day
-
-    product_price = prices.get(a["product"]) or MARKET[a["product"]][0]
-    fert_price = prices.get("FERTILIZER") or MARKET["FERTILIZER"][0]
-    wheat_price = prices.get("WHEAT") or MARKET["WHEAT"][0]
-
-    product = (producing_days / a["interval"]) * product_price * GLUT_HAIRCUT
-    fertiliser = alive_days * fert_price * GLUT_HAIRCUT
-    feed = alive_days * wheat_price
-    return product + fertiliser - a["cost"] - feed
-
-
-def per_tile_day(total, days):
-    """Totals over different horizons are not comparable.
-
-    A melon returns its coins over ten days and a cow over the rest of the
-    season, so comparing the raw totals says a cow is worth twice a melon when
-    per tile-day the melon is ahead. Getting this wrong once cost 25,000 coins
-    a game: the farm covered itself in pens it could not afford to stock.
-    """
-    return total / max(1.0, days)
-
-
-def choose_animal(day, prices, money):
-    """The best animal still worth buying, or None."""
-    best, best_rate = None, 0.0
-    for kind, a in ANIMALS.items():
-        if a["cost"] + CASH_FLOOR > money:
-            continue
-        v = animal_value(kind, day, prices)
-        if v is None:
-            continue
-        rate = per_tile_day(v, LAST_DAY - day)
-        if rate > best_rate:
-            best, best_rate = kind, rate
-    return best
-
-
-def animal_rate(kind, day, prices):
-    v = animal_value(kind, day, prices)
-    return per_tile_day(v, LAST_DAY - day) if v is not None else None
-
-
 def choose_crop(day, prices):
     """The best coins per tile per day still able to finish."""
     best, best_rate = None, 0.0
@@ -195,7 +131,7 @@ def choose_crop(day, prices):
         v = crop_value(crop, day, prices.get(crop) or MARKET[crop][0])
         if v is None or v <= 0:
             continue
-        rate = per_tile_day(v, CROPS[crop]["first"])
+        rate = v / max(1, CROPS[crop]["first"])
         if rate > best_rate:
             best, best_rate = crop, rate
     return best
@@ -211,21 +147,11 @@ def bonus_window(crop):
     return (math.ceil(c["max_day"] / 2), c["max_day"]) if c else (99, -1)
 
 
-def build_tasks(tiles, day, prices, seeds, plant_crop, animal=None,
-                shed=None, hungry_value=0.0):
-    """(x, y, op, coins, need) for every tile worth an action this turn.
-
-    `need` is a precondition the acting unit must satisfy — feeding costs a
-    wheat out of the unit's own pack, and placing an animal means carrying one.
-    """
-    shed = shed or {}
+def build_tasks(tiles, day, prices, seeds, plant_crop):
+    """(x, y, op, coins) for every tile worth an action this turn."""
     tasks = []
-    animal_v = animal_value(animal, day, prices) if animal else None
-    animal_r = animal_rate(animal, day, prices) if animal else None
     plant_v = crop_value(plant_crop, day, prices.get(plant_crop) or
                          (MARKET[plant_crop][0] if plant_crop else 0)) if plant_crop else None
-    plant_r = per_tile_day(plant_v, CROPS[plant_crop]["first"]) \
-        if (plant_crop and plant_v) else 0.0
 
     for y, row in enumerate(tiles):
         for x, tile in enumerate(row):
@@ -233,12 +159,8 @@ def build_tasks(tiles, day, prices, seeds, plant_crop, animal=None,
                 continue
 
             if tile is None:
-                # an empty tile is worth whichever of a crop or a pen pays more
-                if animal and animal_r and animal_r > plant_r * ANIMAL_MARGIN:
-                    tasks.append((x, y, ["BUILD_" + ANIMALS[animal]["pen"]],
-                                  animal_v, None))
-                elif plant_crop and seeds.get(plant_crop, 0) > 0 and plant_v and plant_v > 0:
-                    tasks.append((x, y, ["PLANT", plant_crop], plant_v, None))
+                if plant_crop and seeds.get(plant_crop, 0) > 0 and plant_v and plant_v > 0:
+                    tasks.append((x, y, ["PLANT", plant_crop], plant_v))
                 continue
 
             if not isinstance(tile, dict):
@@ -246,14 +168,8 @@ def build_tasks(tiles, day, prices, seeds, plant_crop, animal=None,
             kind = tile.get("kind")
 
             if kind == "WEED":
-                tasks.append((x, y, ["DIG"], max(5.0, (plant_v or 0) * 0.5), None))
+                tasks.append((x, y, ["DIG"], max(5.0, (plant_v or 0) * 0.5)))
                 continue
-
-            if kind in ("COOP", "PASTURE"):
-                tasks.extend(_animal_tasks(x, y, tile, day, prices, animal,
-                                           animal_v, shed, hungry_value))
-                continue
-
             if kind != "PLANT":
                 continue
 
@@ -266,62 +182,19 @@ def build_tasks(tiles, day, prices, seeds, plant_crop, animal=None,
             price = prices.get(crop) or MARKET.get(crop, (0,))[0]
 
             if age >= c["first"] and units > 0:
-                tasks.append((x, y, ["HARVEST"], units * price * GLUT_HAIRCUT, None))
+                tasks.append((x, y, ["HARVEST"], units * price * GLUT_HAIRCUT))
 
             if not tile.get("watered_today"):
                 lo, hi = bonus_window(crop)
                 if tile.get("consecutive_unwatered", 0) >= 1:
                     # one more dry day and the whole plant is a weed
                     tasks.append((x, y, ["WATER"],
-                                  max(units, 1) * price * GLUT_HAIRCUT + 20.0, None))
+                                  max(units, 1) * price * GLUT_HAIRCUT + 20.0))
                 elif lo <= age <= hi:
-                    tasks.append((x, y, ["WATER"], price * GLUT_HAIRCUT, None))
+                    tasks.append((x, y, ["WATER"], price * GLUT_HAIRCUT))
                 else:
-                    tasks.append((x, y, ["WATER"], 3.0, None))
-
-    # the shed: collecting feed, and fetching a bought animal out to a pen
-    for sx, sy in SHED_TILES:
-        if shed.get("WHEAT", 0) > 0 and hungry_value > 0:
-            tasks.append((sx, sy, ["PICKUP", "WHEAT", CARRY_WHEAT],
-                          hungry_value, None))
-        for kind in ANIMALS:
-            if shed.get(kind, 0) > 0:
-                v = animal_value(kind, day, prices) or 0.0
-                if v > 0:
-                    tasks.append((sx, sy, ["PICKUP", kind, 1], v, None))
+                    tasks.append((x, y, ["WATER"], 3.0))
     return tasks
-
-
-def _animal_tasks(x, y, tile, day, prices, animal, animal_v, shed, hungry_value):
-    """A pen, empty or occupied."""
-    out = []
-    kind = tile.get("animal")
-    if not kind:
-        for k in ANIMALS:
-            if shed.get(k, 0) > 0 and ANIMALS[k]["pen"] == tile.get("kind"):
-                v = animal_value(k, day, prices) or 0.0
-                out.append((x, y, ["PLACE", k], v, k))
-        return out
-
-    a = ANIMALS.get(kind, ANIMALS["COW"])
-    price = prices.get(a["product"]) or MARKET[a["product"]][0]
-    fert = prices.get("FERTILIZER") or MARKET["FERTILIZER"][0]
-    units = tile.get("yield_units", 0)
-
-    if not tile.get("fed_today"):
-        # two unfed days and the animal escapes for good, taking its purchase
-        # price and every remaining day of income with it
-        at_risk = (animal_value(kind, day, prices) or 0.0) + a["cost"] * 0.5
-        if tile.get("consecutive_unfed", 0) >= 1:
-            at_risk *= 2.0
-        out.append((x, y, ["FEED"], max(at_risk, 30.0), "WHEAT"))
-    if units > 0:
-        out.append((x, y, ["HARVEST"], units * price * GLUT_HAIRCUT, None))
-    if tile.get("fertilizer_available"):
-        out.append((x, y, ["COLLECT_FERTILIZER"], fert * GLUT_HAIRCUT, None))
-    if tile.get("fed_today") and not tile.get("cared_today"):
-        out.append((x, y, ["CARE"], price * GLUT_HAIRCUT * 0.8, None))
-    return out
 
 
 # --------------------------------------------------------------------------
@@ -342,7 +215,7 @@ def step_toward(x, y, tx, ty):
     return "PASS"
 
 
-def assign(units, tasks, carrying=None):
+def assign(units, tasks):
     """Greedy maximum-weight matching of units to jobs.
 
     The assignment problem, solved greedily: score every pair once, sort, take
@@ -350,15 +223,9 @@ def assign(units, tasks, carrying=None):
     jobs that lands within a few percent of optimal and costs nothing, which
     matters when it runs 720 times a game.
     """
-    carrying = carrying or [{} for _ in units]
     pairs = []
     for ui, (ux, uy) in enumerate(units):
-        held = carrying[ui] if ui < len(carrying) else {}
-        for ti, task in enumerate(tasks):
-            tx, ty, _op, value = task[0], task[1], task[2], task[3]
-            need = task[4] if len(task) > 4 else None
-            if need and held.get(need, 0) <= 0:
-                continue          # cannot feed without wheat, cannot place
+        for ti, (tx, ty, _op, value) in enumerate(tasks):
             dist = abs(tx - ux) + abs(ty - uy)
             pairs.append((value / (1.0 + TRAVEL_COST * dist), ui, ti))
     pairs.sort(key=lambda p: -p[0])
@@ -385,16 +252,6 @@ CASH_FLOOR = 120
 # price only pays if nobody else is supplying the same market, and on a ladder
 # of farmers somebody always is.
 RESERVE_FRACTION = 0.25
-# FEED spends a wheat from the acting unit's own pack, not the shed. One pickup
-# of this many lets a unit work the whole herd for a day instead of walking
-# back after every animal — the mistake that sank four earlier attempts.
-CARRY_WHEAT = 12
-# An animal has to beat the crop by this much before a tile is converted. A
-# melon price dip is usually our own supply landing and it recovers as the town
-# eats the glut; without a margin the farm rebuilds itself every time that
-# happens and never finishes anything.
-ANIMAL_MARGIN = 1.35
-FEED_ITEMS = ("WHEAT",) + tuple(ANIMALS)
 
 
 def agent(obs, config=None):
@@ -411,19 +268,6 @@ def agent(obs, config=None):
     units = [tuple(me["farmer"])] + [tuple(p) for p in me.get("hands", [])]
 
     plant_crop = choose_crop(day, prices)
-    animal = choose_animal(day, prices, money)
-
-    pens = {"empty": 0, "hungry": 0, "stock": 0}
-    for row in tiles:
-        for t in row:
-            if isinstance(t, dict) and t.get("kind") in ("COOP", "PASTURE"):
-                if t.get("animal"):
-                    pens["stock"] += 1
-                    if not t.get("fed_today"):
-                        pens["hungry"] += 1
-                else:
-                    pens["empty"] += 1
-    hungry_value = pens["hungry"] * 40.0
 
     # ---- market ----------------------------------------------------------
     market = []
@@ -440,28 +284,9 @@ def agent(obs, config=None):
             if n > 0:
                 market.append(["BUY_SEED", plant_crop, n])
 
-    # an animal for every empty pen, once one is worth buying
-    if animal:
-        waiting = sum(shed.get(k, 0) for k in ANIMALS)
-        room = pens["empty"] - waiting
-        if room > 0 and money > ANIMALS[animal]["cost"] + CASH_FLOOR * 2:
-            n = min(room, int((money - CASH_FLOOR) // ANIMALS[animal]["cost"]), 2)
-            if n > 0:
-                market.append(["BUY_ANIMAL", animal, n])
-
-    # feed, bought rather than grown: a wheat a head a day plus a pack to carry
-    feed_needed = (pens["stock"] + CARRY_WHEAT) if pens["stock"] else 0
-    if pens["stock"] and shed.get("WHEAT", 0) < feed_needed and money > CASH_FLOOR * 3:
-        market.append(["BUY_PRODUCT", "WHEAT",
-                       int(feed_needed - shed.get("WHEAT", 0))])
-
     for item, count in sorted(shed.items(), key=lambda kv: -kv[1]):
         if count <= 0 or item not in MARKET or len(market) >= MAX_ORDERS:
             continue
-        if item == "WHEAT":
-            count -= feed_needed          # that is the herd's dinner
-            if count <= 0:
-                continue
         reserve = MARKET[item][0] * RESERVE_FRACTION
         n = sell_quantity(item, inventory.get(item, I0), count, reserve)
         if day >= LAST_DAY:
@@ -470,23 +295,15 @@ def agent(obs, config=None):
             market.append(["SELL", item, int(n)])
 
     # ---- field -----------------------------------------------------------
-    tasks = build_tasks(tiles, day, prices, seeds, plant_crop, animal,
-                        shed, hungry_value)
+    tasks = build_tasks(tiles, day, prices, seeds, plant_crop)
 
-    held = [invs[i] if i < len(invs) else {} for i in range(len(units))]
-
-    # A unit is only "loaded" for produce it cannot use. An animal it is
-    # carrying is going to a pen, and wheat is feed — but only while there is a
-    # herd. With no animals, wheat is the late-season crop, and treating it as
-    # feed left it sitting in packs, never banked and never sold.
-    reserved = tuple(ANIMALS) + (("WHEAT",) if pens["stock"] else ())
     carriers = set()
-    for i, inv in enumerate(held):
-        sellable = sum(v for k, v in inv.items() if v and k not in reserved)
-        if sellable >= DROP_AT:
+    for i in range(len(units)):
+        inv = invs[i] if i < len(invs) else {}
+        if sum(v for v in inv.values() if v) >= DROP_AT:
             carriers.add(i)
 
-    chosen = assign(units, tasks, held)
+    chosen = assign(units, tasks)
     ops = []
     for i, (x, y) in enumerate(units):
         if i in carriers:
@@ -502,7 +319,7 @@ def agent(obs, config=None):
         if ti is None:
             ops.append(["PASS"])
             continue
-        tx, ty, op = tasks[ti][0], tasks[ti][1], tasks[ti][2]
+        tx, ty, op, _ = tasks[ti]
         ops.append(op if (tx, ty) == (x, y) else [step_toward(x, y, tx, ty)])
 
     return {"farmer": ops[0] if ops else ["PASS"],
