@@ -116,3 +116,43 @@ another bolt-on.
 Per Ryo Hasegawa's post, an unchanged agent should not be re-submitted: it
 retires a converged rating for a fresh one at 600 and changes nothing about the
 final Bradley-Terry ranking. So nothing was submitted this round.
+
+## v8 — the scheduler, and the ceiling nobody noticed
+
+`v8_scheduler_base.py`, `v8_scheduler_crops.py`, `v8_scheduler_animals.py`. The
+clean rewrite the last entry called for: jobs priced in coins, units matched by
+greedy assignment, sell sizes computed off the published curve. It beat v7
+10–0 and scored 34,118 against `starter`.
+
+On the ladder it finished **6,505th of 8,221** at 428.9, against a top score of
+2,933 and a median of 793.
+
+The round ended by concluding that animals are dominated — measured in coins per
+*tile*-day on a 25-tile farm, where melon comes out at 74.5 against a cow's
+48.1. The arithmetic was right and the question was wrong twice over. The farm
+is 100 tiles, not 25, because `BUY_LAND` exists and no version had ever called
+it. And tiles were never the scarce thing: turns are, and market depth is.
+Integrating the engine's price curve says melon pays about 26,000 coins for a
+whole season and then nothing, while eggs and fertiliser never crash. An agent
+whose plan is melon has a ceiling, and v8 was sitting on it.
+
+## v9 — the whole board
+
+`main.py`. Land, a flock, and every decision priced at the margin and per
+action. 80,232 against `starter`; 12–0 against both v8 submissions, at roughly
+64,000 coins to 28,000.
+
+Four bugs in it were found by watching a game day by day rather than by reading
+the source, and every one of them looked correct on the page: the feed order was
+re-bought on all twenty-four turns of the day, livestock was bought ahead of
+feed, coops and pastures were counted as one pool, and animals waiting in the
+shed did not count as supply. Details in the top-level README.
+
+## Where this leaves it
+
+The habit that produced the ceiling is worth naming, because it survived seven
+versions: every round was measured against `starter`, and `starter` cannot test
+the decisions that matter. It does not grow melon, so it cannot say whether to
+flood the melon market — the single most valuable call in the agent, worth 10–0
+in a mirror match. It does not buy land, so a farm playing a quarter of the
+board still beat it comfortably enough to look healthy.
