@@ -156,3 +156,37 @@ the decisions that matter. It does not grow melon, so it cannot say whether to
 flood the melon market — the single most valuable call in the agent, worth 10–0
 in a mirror match. It does not buy land, so a farm playing a quarter of the
 board still beat it comfortably enough to look healthy.
+
+## v10 — the town's demand, priced but not won
+
+`v10_town_demand.py`. The shops in `town.unlocked_shops` eat a fixed basket
+every four turns for the rest of the season — a single-product shop eats two,
+so three yarn stores get through thirty-six wool a day. Against a market nobody
+supplies, that holds wool near base price all season, while an agent that models
+inventory as only ever rising values the same wool at a dollar and never keeps a
+sheep. The competition's own notebook titles say as much: *Shape the Shop, Work
+the Pasture*, *Three-Day Shop Router*, *Public State Router*.
+
+So `Econ` got a `drain()` term, crop and animal values were priced against the
+inventory their production will actually sell into, and tomato and strawberry
+were added as ongoing crops — the public meta runs about seven strawberry plots.
+
+It loses. 7-5 against the submitted agent with the drain alone, 4-8 with the
+ongoing crops added, on 47,161 coins to 58,356. The concept is almost certainly
+right and the implementation is not: the drain assumes the shops open now stay
+open and that we are the only supplier, so wool and milk look far better than
+they are once the opponent sells into the same shops. Kept for the next attempt,
+which should price the drain as *shared* the way melon already is.
+
+Two things from the same reading that are worth keeping regardless:
+
+  * `kaggle-environments` 1.32.4 made `BUY_PRODUCT` and `BUY_ANIMAL` fail when
+    the shed is at capacity, so a full shed silently blocks feed and starves
+    animals. Market orders are processed in list order, so sells must be queued
+    before buys. Measured: the agent never actually hits 100 items, because it
+    dumps at 70. Not biting yet, but one flock size away from biting.
+  * Public leaders print 100k-170k against `starter` and use about 6-16 melon
+    tiles, 8 cows and 6 sheep. This agent prints 80k on 25 melon tiles, which
+    is the Melon IPO cluster — whose documented failure mode is meeting a second
+    melon dumper and hitting the $1 floor. That matches the mirror match, where
+    it halves to 38k.
