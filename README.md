@@ -10,6 +10,25 @@ A scheduler rather than a rulebook. Every tile that wants work is priced in
 coins per action, every (unit, job) pair is discounted by the walk, and the
 pairs are matched against that score.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="reports/figures/farm-board-dark.png">
+  <img alt="The same farm on day 4, day 12 and day 26: twenty-five melon tiles and an empty bank; then thirteen thousand coins, two more quadrants bought and pens going up; then a farm spread across three quadrants with fifty-three thousand banked" src="reports/figures/farm-board-light.png">
+</picture>
+
+<sub>One real game against the built-in starter, seed 1003 — not an illustration
+of one. Circles are the farmer and the hired hands; the black square is the
+shed, which every sale has to pass through.</sub>
+
+The three panels are the whole strategy. **Day 4:** every tile of the starting
+quadrant is melon and the bank is down to $167, because melon is the only thing
+on this board worth going all-in on. **Day 12:** the crop has landed, and the
+proceeds have bought two more quadrants. **Day 26:** the farm covers three
+quadrants and the bank is at $53,645, against the starter's $3,690.
+
+The pale blue tiles on day 26 are pens standing empty. That is not a design;
+it is the agent's most expensive remaining habit, and it is described honestly
+further down.
+
 | | vs `starter`, 8 seeds | vs the previous agent, seats alternated |
 |---|---:|---|
 | previous agent (on the ladder at rank 6,505) | 34,866 | — |
@@ -19,6 +38,16 @@ pairs are matched against that score.
 
 It was a decent scheduler that had never read the price table. Integrating the
 engine's own curve gives the total a season can pay for each good:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="reports/figures/market-depth-dark.png">
+  <img alt="Cumulative revenue against units sold: melon flattens completely at about 26,700 coins after 150 units, wool flattens at 8,000 after 50, while fertilizer, egg and wheat keep climbing to the right edge of the chart" src="reports/figures/market-depth-light.png">
+</picture>
+
+Melon is the steepest line on the board and the first to stop. It flattens
+completely at about 150 units — after that the price is $1 and another melon is
+worth nothing at all. Wool stops even earlier, at 50. Egg, fertiliser and wheat
+never flatten, which is the entire reason this agent keeps a flock.
 
 | units sold | 30 | 100 | 250 | 400 | price of the 400th |
 |---|---:|---:|---:|---:|---:|
@@ -48,6 +77,15 @@ Three engine facts the old agent never used.
   144 coins for twenty-four actions.
 * **End of day empties every pack into the shed anyway**, so walking back to
   bank a single item bought nothing but steps.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="reports/figures/bank-over-season-dark.png">
+  <img alt="Bank over thirty days: flat and near zero until day ten, a nine-thousand-coin jump when the melon crop lands, then a steady climb to 63,659 against the starter's 3,690" src="reports/figures/bank-over-season-light.png">
+</picture>
+
+Nine days of nothing, then the melon crop lands and pays for everything after
+it. An agent that spends those nine days looking prudent finishes with a
+prudent number.
 
 ## Coins per action
 
